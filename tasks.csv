@@ -1,0 +1,5 @@
+name,cas,exposure,unit,breakthrough,cartridge,respirator_type,humidity,temp_c,work_intensity,pressure_atm
+Ethylene Oxide,75-21-8,2,mg/m3,1,6001CN,可更换式,<65,10,light,1
+Benzene,71-43-2 ,2,mg/m3,1,6001CN,可更换式,<65,30,light,1
+Dimethylamine,124-40-3,3,mg/m3,2,6001CN,可更换式,<65,30,light,1
+Aniline,62-53-3,2,mg/m3,1.5,6001CN,可更换式,<65,20,light,1
