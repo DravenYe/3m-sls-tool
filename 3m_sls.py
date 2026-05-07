@@ -1,5 +1,5 @@
 """
-3M Service Life Software - Automation Tool v2.0
+3M Service Life Software - Automation Tool v2.1
 
 Workflow:
   Step 0  Homepage -> select China region -> click >
@@ -195,12 +195,14 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
 
     result = {"name": chem_name, "cas": cas, "cartridge": cartridge,
               "status": "failed", "service_life": "", "pdf_path": "", "error": ""}
+    op = "初始化"
 
     log(f"[{idx}/{total}] {chem_name} ({cas}) x {cartridge}", "step")
 
     try:
         # ── Step 0: navigate, select China, dismiss cookie, click next ─────────
         log("  Step 0 select region...", "info")
+        op = "加载 3M SLS 首页"
         await page.goto("https://sls.3m.com/", wait_until="load", timeout=30000)
         await page.get_by_text("China (中国大陆) - 简体中文").click()
         await _dismiss_cookie_banner(page)   # cookie appears AFTER clicking China
@@ -222,24 +224,50 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
 
         # ── Step 2: search chemical ───────────────────────────────────────────
         log(f"  Step 2 search CAS {cas}...", "info")
+        op = "进入化学品搜索页"
         search = page.get_by_role("searchbox", name="通过名称或CAS#查找")
         await search.wait_for(state="visible", timeout=10000)
         await search.fill(cas)
         await page.locator(".inputSearch-label-icon > svg").click()
         await asyncio.sleep(3)
+        await _dismiss_cookie_banner(page)  # banner sometimes reappears mid-session
 
-        # select chemical via its checkbox icon
-        await page.locator(".inputBox-label-icon > svg").first.wait_for(state="visible", timeout=30000)
+        # verify correct CAS appears in results, then click its checkbox
+        op = f"搜索化学品 CAS# {cas}"
+        await page.locator(f"text=CAS# {cas}").wait_for(state="visible", timeout=30000)
         await page.locator(".inputBox-label-icon > svg").first.click()
         await asyncio.sleep(0.5)
 
         # fill unit first (as recorded), then exposure, then breakthrough
         log(f"  Step 2 unit={unit}, exposure={exposure}, breakthrough={breakthrough or 'none'}...", "info")
-        unit_val = "mg/m3" if unit in ("mg/m³", "mg/m3") else unit
-        await page.get_by_label("单位").select_option(unit_val)
+        op = f"设置浓度单位 '{unit}'"
+        unit_norm = unit.lower().replace("³", "3").replace(" ", "")
+        unit_sel = page.get_by_label("单位")
+        try:
+            await unit_sel.wait_for(state="visible", timeout=5000)
+        except Exception:
+            # fallback: find any select that has ppm or mg/m3 options
+            unit_sel = page.locator("select").filter(
+                has=page.locator("option").filter(has_text=re.compile(r'ppm|mg/m', re.I))
+            ).first
+            await unit_sel.wait_for(state="visible", timeout=15000)
+        unit_opts = await unit_sel.evaluate(
+            "el => [...el.options].map(o => ({v: o.value, t: o.text.trim()}))"
+        )
+        u_opt = next(
+            (o for o in unit_opts
+             if unit_norm in o["t"].lower().replace("³", "3").replace(" ", "")),
+            None
+        )
+        if u_opt:
+            await unit_sel.select_option(value=u_opt["v"])
+        else:
+            available = [o["t"] for o in unit_opts if o["t"]]
+            raise Exception(f"No options were found matching unit '{unit}'. Available: {available}")
         await asyncio.sleep(0.3)
 
-        exp_box = page.get_by_role("textbox", name="暴露: 突破浓度")
+        op = "填写暴露浓度"
+        exp_box = page.get_by_role("textbox", name=re.compile(r'暴露')).first
         await exp_box.wait_for(state="visible", timeout=8000)
         await exp_box.fill(str(exposure))
 
@@ -257,6 +285,7 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
         await asyncio.sleep(1)
 
         # select respirator type, then click 完成
+        op = f"选择呼吸器类型 '{resp_type}'"
         await page.get_by_text(resp_type).click()
         await page.get_by_role("button", name="完成").click()
         await asyncio.sleep(0.5)
@@ -270,6 +299,7 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
         await asyncio.sleep(3)
 
         # click the cartridge button (partial name match on model number)
+        op = f"搜索滤盒型号 '{cartridge}'"
         cart_btn = page.get_by_role("button", name=re.compile(cartridge, re.IGNORECASE))
         await cart_btn.first.wait_for(state="visible", timeout=30000)
         await cart_btn.first.click()
@@ -282,21 +312,20 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
         log(f"  Step 4 temp={temp_val}C, intensity={intensity_label}, ATM={pressure}...", "info")
 
         # temperature: match by visible text containing the number, skip blank first option
+        op = "加载环境设置页"
         temp_sel = page.get_by_label("温度")
         await temp_sel.wait_for(state="visible", timeout=10000)
         opts = await temp_sel.evaluate(
             "el => [...el.options].map(o => ({v: o.value, t: o.text.trim()}))"
         )
         log(f"  Temp options: {[o['t'] for o in opts]}", "info")
+        op = f"设置温度 '{temp_val}°C'"
         t_opt = next((o for o in opts if re.search(r'\b' + str(temp_val) + r'\b', o["t"])), None)
         if t_opt:
             await temp_sel.select_option(value=t_opt["v"])
         else:
-            log(f"  ! temp {temp_val} not found in options, using index by position", "warn")
-            pos = TEMP_OPTIONS.index(temp_val) if temp_val in TEMP_OPTIONS else 0
-            non_blank = [o for o in opts if o["t"]]
-            if pos < len(non_blank):
-                await temp_sel.select_option(value=non_blank[pos]["v"])
+            available = [o["t"] for o in opts if o["t"]]
+            raise Exception(f"No options were found matching temp '{temp_val}°C'. Available: {available}")
 
         # work intensity: match by visible label text
         int_sel = page.get_by_label("工作强度")
@@ -304,8 +333,13 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
             "el => [...el.options].map(o => ({v: o.value, t: o.text.trim()}))"
         )
         log(f"  Intensity options: {[o['t'] for o in opts]}", "info")
+        op = f"设置工作强度 '{task.get('work_intensity')}'"
         i_opt = next((o for o in opts if intensity_label in o["t"]), None)
-        await int_sel.select_option(value=i_opt["v"] if i_opt else opts[1]["v"])
+        if i_opt:
+            await int_sel.select_option(value=i_opt["v"])
+        else:
+            available = [o["t"] for o in opts if o["t"]]
+            raise Exception(f"No options were found matching intensity '{task.get('work_intensity')}'. Available: {available}")
 
         # atmospheric pressure
         atm = page.get_by_role("spinbutton", name="大气压")
@@ -318,6 +352,7 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
 
         # ── Step 5: results & PDF ─────────────────────────────────────────────
         log("  Step 5 generate and download PDF...", "info")
+        op = "加载查阅结果页"
         await page.wait_for_selector("text=使用寿命估算", timeout=20000)
 
         body = await page.inner_text("body")
@@ -351,12 +386,26 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
         result.update({"status": "ok", "service_life": service_life, "pdf_path": str(pdf_path)})
 
     except Exception as e:
-        result["error"] = str(e)
-        log(f"  Failed: {e}", "error")
+        err_str = str(e)
+        is_timeout = "TimeoutError" in type(e).__name__ or "Timeout" in err_str
+
+        if "No options were found" in err_str or "no option" in err_str.lower():
+            msg = f"下拉选项不存在：{op}（请核对 CSV 中填写的值）"
+        elif is_timeout and "CAS#" in op:
+            msg = f"未找到化学品：CAS# {cas} 在网站中无搜索结果"
+        elif is_timeout and "滤盒" in op:
+            msg = f"未找到滤盒：型号 {cartridge!r} 在搜索结果中不存在"
+        elif is_timeout:
+            msg = f"网络超时：{op} 加载失败，请检查网络后重试"
+        else:
+            msg = f"{op} 失败：{err_str}"
+
+        result["error"] = msg
+        log(f"  Failed: {msg}", "error")
         try:
             shot = output_dir / f"ERROR_{re.sub(r'[\\/:*?<>|]','_',chem_name)}_{datetime.now().strftime('%H%M%S')}.png"
             await page.screenshot(path=str(shot), full_page=True)
-            log(f"  Screenshot saved: {shot.name} (send to Claude for debugging)", "warn")
+            log(f"  Screenshot saved: {shot.name}", "warn")
         except Exception:
             pass
 
@@ -432,7 +481,7 @@ def main():
 
     print(f"""
 {C.BOLD}{C.CYAN}╔══════════════════════════════════════════╗
-║   3M Cartridge Service Life Tool v2.0   ║
+║   3M Cartridge Service Life Tool v2.1   ║
 ║   Playwright headless - runs in bg      ║
 ╚══════════════════════════════════════════╝{C.RESET}
 """)
