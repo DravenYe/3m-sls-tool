@@ -1,4 +1,4 @@
-# 3M Cartridge Service Life Tool
+# 3M Cartridge Service Life Tool V2.0
 
 Automates the 3M SLS website to calculate cartridge service life and download PDF reports.
 
