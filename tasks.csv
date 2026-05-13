@@ -1,3 +1,7 @@
-name,cas,exposure,unit,breakthrough,cartridge,respirator_type,humidity,temp_c,work_intensity,pressure_atm
-MDI粗二苯基甲烷二异氰酸酯,101-68-8,0.0031,mg/m3,0.00031,6006,可更换式,<65,40,light,1
-甲醛,50-00-0,0.067,mg/m3,,6006,可更换式,<65,30,light,1
+name,cas,exposure,unit,breakthrough,cartridge,respirator_type,humidity,temp_c,work_intensity,pressure_atm,OEL,OEL-unit
+MDI粗二苯基甲烷二异氰酸酯,101-68-8,0.0031,mg/m3,,6006,可更换式,<65,40,light,1,,
+甲醛,50-00-0,0.067,mg/m3,,6006,可更换式,<65,30,light,1,,
+氨,7664-41-7,0.13,mg/m3,,6006,可更换式,<65,30,light,1,,
+二硝基甲苯,25321-14-6,0.068,mg/m3,,6006,可更换式,<65,30,light,1,,
+硝基苯,98-95-3,0.011,mg/m3,,6006,可更换式,<65,30,light,1,,
+苯胺,62-53-3,0.36,mg/m3,,6006,可更换式,<65,30,light,1,,

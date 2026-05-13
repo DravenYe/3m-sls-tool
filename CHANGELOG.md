@@ -1,5 +1,21 @@
 # Changelog
 
+## [v2.2] - 2026-05-13
+
+### 单位自动换算
+- 新增 PubChem 分子量自动查询：CSV 填 `mg/m³`，工具自动换算为 ppm 后提交网站
+- 网站单位下拉框不再操作，保持默认 ppm
+- 支持 OEL 列作为暴露浓度来源（`OEL` + `OEL-unit` 两列）
+- 突破浓度留空时自动计算；部分化学品（如氨）网页无此字段，自动跳过
+
+### 可追溯 Summary
+- Summary CSV 新增列：`exposure_source`、`exposure_ppm`、`original_exposure`、`original_unit`、`mol_weight`
+
+### 文件重命名
+- 主脚本、启动器、录制器均加 `_v2` 后缀，与原版文件夹区分
+
+---
+
 ## [v2.1] - 2026-05-07
 
 ### 错误报告优化

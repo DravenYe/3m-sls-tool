@@ -17,5 +17,5 @@ if errorlevel 1 (
 
 echo  Python OK. Starting tool...
 echo.
-python 3m_sls.py
+python 3m_sls_v2.py
 pause

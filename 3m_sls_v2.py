@@ -1,5 +1,5 @@
 """
-3M Service Life Software - Automation Tool v2.1
+3M Service Life Software - Automation Tool v2.2
 
 Workflow:
   Step 0  Homepage -> select China region -> click >
@@ -16,7 +16,9 @@ import csv
 import sys
 import os
 import re
+import json
 import subprocess
+import urllib.request
 from pathlib import Path
 from datetime import datetime
 
@@ -80,7 +82,61 @@ INTENSITY_MAP = {
     "heavy":    "重度", "重度": "重度", "重": "重度",
 }
 
-REQUIRED_FIELDS = ["cas", "exposure", "unit", "cartridge", "humidity", "temp_c", "work_intensity"]
+REQUIRED_FIELDS = ["cas", "cartridge", "humidity", "temp_c", "work_intensity"]
+
+# ─── Unit conversion ─────────────────────────────────────────────────────────
+
+def _get_mol_weight(cas: str) -> float:
+    url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{cas}/property/MolecularWeight/JSON"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read())
+        return float(data["PropertyTable"]["Properties"][0]["MolecularWeight"])
+    except Exception:
+        raise RuntimeError(f"PubChem 查不到 CAS {cas} 的分子量，请手动换算为 ppm 后填写")
+
+def preprocess_tasks(tasks: list) -> list:
+    """Resolve exposure source (exposure vs OEL) and convert mg/m3 to ppm."""
+    out = []
+    for i, t in enumerate(tasks, 1):
+        t = dict(t)
+
+        # Determine exposure source
+        if not t.get("exposure") and t.get("oel"):
+            t["exposure"] = t["oel"]
+            t["unit"] = t.get("oel-unit", "mg/m3")
+            t["_exposure_source"] = "OEL"
+            log(f"  [{i}] 使用 OEL 作为暴露浓度: {t['exposure']} {t['unit']}", "info")
+        else:
+            t["_exposure_source"] = "exposure"
+
+        unit = t.get("unit", "ppm").lower().replace(" ", "").replace("³", "3")
+        if unit in ("mg/m3",):
+            cas = t["cas"]
+            log(f"  [{i}] 查询分子量 CAS {cas} (PubChem)...", "info")
+            mw = _get_mol_weight(cas)
+            exp_ppm = round(float(t["exposure"]) * 24.45 / mw, 6)
+            log(f"  [{i}] {t['exposure']} mg/m³ → {exp_ppm} ppm (MW={mw})", "ok")
+            t["_original_exposure"] = t["exposure"]
+            t["_original_unit"] = "mg/m³"
+            t["_mol_weight"] = str(mw)
+            t["exposure"] = str(exp_ppm)
+            if t.get("breakthrough"):
+                bt_ppm = round(float(t["breakthrough"]) * 24.45 / mw, 6)
+                t["breakthrough"] = str(bt_ppm)
+        else:
+            t["_original_exposure"] = ""
+            t["_original_unit"] = ""
+            t["_mol_weight"] = ""
+
+        # Auto-set breakthrough to 10% of exposure (ppm) if not provided
+        if not t.get("breakthrough"):
+            bt_auto = round(float(t["exposure"]) * 0.1, 6)
+            t["breakthrough"] = str(bt_auto)
+            log(f"  [{i}] 突破浓度自动设为 {bt_auto} ppm (= 10% × 暴露浓度)", "info")
+
+        out.append(t)
+    return out
 
 # ─── CSV load & validate ──────────────────────────────────────────────────────
 
@@ -100,6 +156,8 @@ def validate_tasks(tasks: list) -> list:
         for f in REQUIRED_FIELDS:
             if not t.get(f):
                 errors.append(f"Row {i}: missing required field '{f}'")
+        if not t.get("exposure") and not t.get("oel"):
+            errors.append(f"Row {i}: must have either 'exposure' or 'oel'")
         hum = t.get("humidity", "").lower().replace(" ", "")
         if hum not in HUMIDITY_MAP:
             errors.append(f"Row {i}: humidity '{t.get('humidity')}' invalid, use <65 or >=65")
@@ -179,7 +237,6 @@ async def click_next(page):
 async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> dict:
     cas           = task["cas"]
     exposure      = task["exposure"]
-    unit          = task["unit"]               # ppm or mg/m3
     cartridge     = task["cartridge"]          # e.g. 6001CN
     humidity_key  = task["humidity"].lower().replace(" ", "")
     temp_raw      = int(task["temp_c"])
@@ -194,7 +251,13 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
     intensity_label = INTENSITY_MAP.get(intensity_key, "轻度")
 
     result = {"name": chem_name, "cas": cas, "cartridge": cartridge,
-              "status": "failed", "service_life": "", "pdf_path": "", "error": ""}
+              "status": "failed", "service_life": "",
+              "exposure_source": task.get("_exposure_source", "exposure"),
+              "exposure_ppm": exposure,
+              "original_exposure": task.get("_original_exposure", ""),
+              "original_unit": task.get("_original_unit", ""),
+              "mol_weight": task.get("_mol_weight", ""),
+              "pdf_path": "", "error": ""}
     op = "初始化"
 
     log(f"[{idx}/{total}] {chem_name} ({cas}) x {cartridge}", "step")
@@ -238,34 +301,7 @@ async def run_task(page, task: dict, output_dir: Path, idx: int, total: int) -> 
         await page.locator(".inputBox-label-icon > svg").first.click()
         await asyncio.sleep(0.5)
 
-        # fill unit first (as recorded), then exposure, then breakthrough
-        log(f"  Step 2 unit={unit}, exposure={exposure}, breakthrough={breakthrough or 'none'}...", "info")
-        op = f"设置浓度单位 '{unit}'"
-        unit_norm = unit.lower().replace("³", "3").replace(" ", "")
-        unit_sel = page.get_by_label("单位")
-        try:
-            await unit_sel.wait_for(state="visible", timeout=5000)
-        except Exception:
-            # fallback: find any select that has ppm or mg/m3 options
-            unit_sel = page.locator("select").filter(
-                has=page.locator("option").filter(has_text=re.compile(r'ppm|mg/m', re.I))
-            ).first
-            await unit_sel.wait_for(state="visible", timeout=15000)
-        unit_opts = await unit_sel.evaluate(
-            "el => [...el.options].map(o => ({v: o.value, t: o.text.trim()}))"
-        )
-        u_opt = next(
-            (o for o in unit_opts
-             if unit_norm in o["t"].lower().replace("³", "3").replace(" ", "")),
-            None
-        )
-        if u_opt:
-            await unit_sel.select_option(value=u_opt["v"])
-        else:
-            available = [o["t"] for o in unit_opts if o["t"]]
-            raise Exception(f"No options were found matching unit '{unit}'. Available: {available}")
-        await asyncio.sleep(0.3)
-
+        log(f"  Step 2 exposure={exposure} ppm, breakthrough={breakthrough or 'none'}...", "info")
         op = "填写暴露浓度"
         exp_box = page.get_by_role("textbox", name=re.compile(r'暴露')).first
         await exp_box.wait_for(state="visible", timeout=8000)
@@ -468,7 +504,11 @@ async def run_all(tasks: list, output_dir: Path, headless: bool) -> list:
 def save_summary(results: list, output_dir: Path) -> Path:
     path = output_dir / f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["name", "cas", "cartridge", "status", "service_life", "pdf_path", "error"])
+        w = csv.DictWriter(f, fieldnames=["name", "cas", "cartridge", "status", "service_life",
+                                           "exposure_source", "exposure_ppm",
+                                           "original_exposure", "original_unit",
+                                           "mol_weight", "pdf_path", "error"],
+                           extrasaction="ignore")
         w.writeheader()
         w.writerows(results)
     return path
@@ -481,7 +521,7 @@ def main():
 
     print(f"""
 {C.BOLD}{C.CYAN}╔══════════════════════════════════════════╗
-║   3M Cartridge Service Life Tool v2.1   ║
+║   3M Cartridge Service Life Tool v2.2   ║
 ║   Playwright headless - runs in bg      ║
 ╚══════════════════════════════════════════╝{C.RESET}
 """)
@@ -521,6 +561,15 @@ def main():
         sys.exit(1)
     for e in errors:
         log(e, "warn")
+
+    log("Preprocessing tasks (unit conversion if needed)...", "info")
+    try:
+        tasks = preprocess_tasks(tasks)
+    except RuntimeError as e:
+        log(str(e), "error")
+        input("Press Enter to exit...")
+        sys.exit(1)
+    log("Preprocessing done", "ok")
 
     output_dir = script_dir / "output"
     output_dir.mkdir(exist_ok=True)
